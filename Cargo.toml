@@ -1,0 +1,8 @@
+[package]
+name = "concurrent-hash-map"
+version = "0.1.0"
+authors = ["Alisdair Owens <alisdair@zaltys.net>"]
+
+[dependencies]
+crossbeam="0.2.8"
+rand="0.3.14"
