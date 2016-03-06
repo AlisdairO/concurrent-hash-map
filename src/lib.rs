@@ -130,7 +130,7 @@ impl<K: Eq + Hash + Sync + Debug + Clone, V: Sync + Clone + Debug> ConcurrentHas
         self.inner.remove(key, &mut SipHasher::new_with_keys(self.rng_keys.0, self.rng_keys.1))
     }
 
-    fn increase_to_multiple(num: u32, multiple: u32) -> u32 {
+    /*fn increase_to_multiple(num: u32, multiple: u32) -> u32 {
         if multiple == 0 {
             return num;
         }
@@ -141,7 +141,7 @@ impl<K: Eq + Hash + Sync + Debug + Clone, V: Sync + Clone + Debug> ConcurrentHas
         }
 
         num + multiple - remainder
-    }
+    }*/
 }
 
 impl<K: Eq + Hash + Sync + Debug + Clone, V: Sync + Clone + Debug> CHMInner<K, V> {
@@ -399,6 +399,7 @@ impl<K: Eq + Hash + Sync + Debug + Clone, V: Sync + Clone + Debug> CHMSegment<K,
     }
 
     // Test only, used to hold the lock while we do gets etc.  Checks non-blocking working
+    #[allow(dead_code)]
     fn lock_then_do_work<F: Fn()>(&self, work: F) {
         let lock_guard = self.lock.lock();
         work();
@@ -414,20 +415,13 @@ impl<K: Eq + Hash + Sync + Debug + Clone, V: Sync + Clone + Debug> Drop for CHMS
     }
 }
 
-mod tests {
+#[cfg(test)]
+mod test {
     use super::*;
     use super::CHMSegment;
     use std::sync::mpsc::sync_channel;
     use std::thread;
     use std::sync::Arc;
-    
-    #[test]
-    fn incr_to_multiple() {
-        assert_eq!(ConcurrentHashMap::<u32,u32>::increase_to_multiple(1, 16), 16u32);
-        assert_eq!(ConcurrentHashMap::<u32,u32>::increase_to_multiple(0, 16), 0u32);
-        assert_eq!(ConcurrentHashMap::<u32,u32>::increase_to_multiple(16, 16), 16u32);
-        assert_eq!(ConcurrentHashMap::<u32,u32>::increase_to_multiple(17, 16), 32u32);
-    }
     
     #[test]
     fn seg_bit_mask() {
