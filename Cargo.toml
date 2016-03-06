@@ -1,6 +1,6 @@
 [package]
 name = "concurrent-hash-map"
-version = "0.1.0"
+version = "0.0.1"
 authors = ["Alisdair Owens <alisdair@zaltys.net>"]
 
 [dependencies]
