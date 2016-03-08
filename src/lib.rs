@@ -7,7 +7,6 @@ use std::sync::Mutex;
 use std::hash::SipHasher;
 use std::hash::Hasher;
 use std::cmp::min;
-use std::fmt::Debug;
 use rand::Rng;
 use std::sync::atomic::Ordering::{Acquire, Release, Relaxed};
 use std::sync::atomic::AtomicUsize;
@@ -42,18 +41,18 @@ const MAX_LOAD_FACTOR: f32 = 1.0;
 /// 
 /// For now it may be useful for long lived hashmaps with a relatively steady size, but I
 /// don't recommend using it for anything important :-).
-pub struct ConcurrentHashMap<K: Eq + Hash + Sync + Debug + Clone, V: Sync + Clone + Debug> {
+pub struct ConcurrentHashMap<K: Eq + Hash + Sync + Clone, V: Sync + Clone> {
     inner: Arc<CHMInner<K, V>>,
     rng_keys: (u64, u64),
 }
 
-pub struct CHMInner<K: Eq + Hash + Sync + Debug + Clone, V: Sync + Clone + Debug> {
+pub struct CHMInner<K: Eq + Hash + Sync + Clone, V: Sync + Clone> {
     segments: Vec<CHMSegment<K, V>>,
     bit_mask: u32,
     mask_shift_count: u32,
 }
 
-struct CHMSegment<K: Eq + Hash + Sync + Debug + Clone, V: Sync + Clone + Debug> {
+struct CHMSegment<K: Eq + Hash + Sync + Clone, V: Sync + Clone> {
     table: Atomic<Vec<Atomic<CHMEntry<K, V>>>>,
     lock: Mutex<()>,
     //todo: the following could just be fenced rather than using atomic types.  Easier
@@ -69,13 +68,13 @@ struct CHMEntry<K, V> {
     next: Atomic<CHMEntry<K, V>>
 }
 
-impl<K: Eq + Hash + Sync + Debug + Clone, V: Sync + Clone + Debug> Clone for ConcurrentHashMap<K, V> {
+impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> Clone for ConcurrentHashMap<K, V> {
     fn clone(&self) -> ConcurrentHashMap<K, V> {
         ConcurrentHashMap{ inner: self.inner.clone(), rng_keys: self.rng_keys }
     }
 }
 
-impl<K: Eq + Hash + Sync + Debug + Clone, V: Sync + Clone + Debug> ConcurrentHashMap<K, V> {
+impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> ConcurrentHashMap<K, V> {
 
     pub fn new() -> ConcurrentHashMap<K, V> {
         Self::new_with_options(DEFAULT_CAPACITY, DEFAULT_SEGMENT_COUNT, DEFAULT_LOAD_FACTOR)
@@ -132,7 +131,7 @@ impl<K: Eq + Hash + Sync + Debug + Clone, V: Sync + Clone + Debug> ConcurrentHas
 
 }
 
-impl<K: Eq + Hash + Sync + Debug + Clone, V: Sync + Clone + Debug> CHMInner<K, V> {
+impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> CHMInner<K, V> {
 
     fn new(capacity: u32, seg_count: u32, load_factor: f32) -> CHMInner<K, V> {
         assert!(seg_count % 2 == 0 || seg_count == 1);
@@ -195,7 +194,7 @@ impl<K: Eq + Hash + Sync + Debug + Clone, V: Sync + Clone + Debug> CHMInner<K, V
     }
 }
 
-impl<K: Eq + Hash + Sync + Debug + Clone, V: Sync + Clone + Debug> CHMSegment<K, V> {
+impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> CHMSegment<K, V> {
 
     fn new(capacity: u32, load_factor: f32) -> CHMSegment<K, V> {
         debug_assert!(capacity % 2 == 0 || capacity == 1);
@@ -396,7 +395,7 @@ impl<K: Eq + Hash + Sync + Debug + Clone, V: Sync + Clone + Debug> CHMSegment<K,
 
 }
 
-impl<K: Eq + Hash + Sync + Debug + Clone, V: Sync + Clone + Debug> Drop for CHMSegment<K, V> {
+impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> Drop for CHMSegment<K, V> {
     fn drop(&mut self) {
         let lock_guard = self.lock.lock().expect("Couldn't lock segment mutex");
         let guard = epoch::pin();
