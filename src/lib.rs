@@ -130,18 +130,6 @@ impl<K: Eq + Hash + Sync + Debug + Clone, V: Sync + Clone + Debug> ConcurrentHas
         self.inner.remove(key, &mut SipHasher::new_with_keys(self.rng_keys.0, self.rng_keys.1))
     }
 
-    /*fn increase_to_multiple(num: u32, multiple: u32) -> u32 {
-        if multiple == 0 {
-            return num;
-        }
-
-        let remainder = num % multiple;
-        if remainder == 0 {
-            return num;
-        }
-
-        num + multiple - remainder
-    }*/
 }
 
 impl<K: Eq + Hash + Sync + Debug + Clone, V: Sync + Clone + Debug> CHMInner<K, V> {
@@ -410,8 +398,10 @@ impl<K: Eq + Hash + Sync + Debug + Clone, V: Sync + Clone + Debug> CHMSegment<K,
 
 impl<K: Eq + Hash + Sync + Debug + Clone, V: Sync + Clone + Debug> Drop for CHMSegment<K, V> {
     fn drop(&mut self) {
+        let lock_guard = self.lock.lock().expect("Couldn't lock segment mutex");
         let guard = epoch::pin();
-        unsafe {Self::destroy_table(self.table.load(Acquire, &guard).unwrap(), &guard) };
+        unsafe {Self::destroy_table(self.table.load(Relaxed, &guard).unwrap(), &guard) };
+        drop(lock_guard);
     }
 }
 
