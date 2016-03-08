@@ -129,6 +129,10 @@ impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> ConcurrentHashMap<K, V> {
         self.inner.remove(key, &mut SipHasher::new_with_keys(self.rng_keys.0, self.rng_keys.1))
     }
 
+    pub fn size(&self) -> u32 {
+        self.inner.size()
+    }
+
 }
 
 impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> CHMInner<K, V> {
@@ -192,6 +196,10 @@ impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> CHMInner<K, V> {
         let segment = self.get_segment_from_hash(hash);
         (segment as usize, hash)
     }
+
+    fn size(&self) -> u32 {
+        self.segments.iter().fold(0, |acc, segment| acc + segment.size() as u32)
+    }
 }
 
 impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> CHMSegment<K, V> {
@@ -206,9 +214,13 @@ impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> CHMSegment<K, V> {
         //Don't believe we need Release here - new only called when we're constructing the CHM. Releasing should be handled by
         //concurrency primitives transferring the CHM between threads.
         //segment.table.store(Some(Owned::new(Self::new_table(capacity))), Relaxed);
-        segment.table.store(Some(Owned::new(Self::new_table(1))), Relaxed);
+        segment.table.store(Some(Owned::new(Self::new_table(capacity))), Relaxed);
 
         segment
+    }
+
+    fn size(&self) -> usize {
+        self.size.load(Relaxed)
     }
 
     fn insert(&self, key: K, value: V, hash: u32) -> Option<V> {
@@ -236,6 +248,8 @@ impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> CHMSegment<K, V> {
             let bucket_data = bucket.load(Relaxed, &guard);
             let entry = match bucket_data {
                 None => {
+                    // try to avoid LOCK CMPXCHG, we're single threaded anyway
+                    self.size.store(self.size() + 1, Relaxed);
                     break;
                 },
                 Some(data) => data
@@ -250,14 +264,13 @@ impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> CHMSegment<K, V> {
             }
         }
         let old_node = bucket.swap(Some(new_node), Release, &guard);
-        self.size.fetch_add(1, Relaxed);
         if let Some(old_node_content) = old_node {
             unsafe {
                 guard.unlinked(old_node_content);
             }
         } else {
             // do we need to resize the table?
-            if self.size.load(Relaxed) >= self.max_capacity.load(Relaxed) {
+            if self.size() >= self.max_capacity.load(Relaxed) {
                 self.grow(&guard);
             }
         }
@@ -375,6 +388,19 @@ impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> CHMSegment<K, V> {
 
     fn get_bucket(&self, hash: u32, cap: u32) -> u32 {
         hash & (cap - 1)
+    }
+
+    // Test only
+    #[allow(dead_code)]
+    fn table_cap(&self) -> usize {
+        let guard = epoch::pin();
+        self.table.load(Acquire, &guard).expect("Table should have been initialised on creation").len()
+    }
+
+    // Test only
+    #[allow(dead_code)]
+    fn max_cap(&self) -> usize {
+        self.max_capacity.load(Relaxed)
     }
 
     fn new_table(capacity: u32) -> Vec<Atomic<CHMEntry<K, V>>>{
@@ -504,8 +530,32 @@ mod test {
     }
     
     #[test]
-    fn check_growth() {
-        //TODO
+    fn check_size() {
+        let chm = CHMSegment::<u32, u32>::new(16, 1.0);
+        assert_eq!(chm.max_cap(), 16);
+        assert_eq!(chm.table_cap(), 16);
+        assert_eq!(chm.size(), 0);
+        for i in 0..100 {
+            chm.insert(i,i,i);
+        }
+        assert_eq!(chm.size(), 100);
+        assert_eq!(chm.max_cap(), 128);
+        assert_eq!(chm.table_cap(), 128);
+
+        for i in 0..100 {
+            chm.insert(i,i+1,i);
+        }
+        assert_eq!(chm.size(), 100);
+        assert_eq!(chm.max_cap(), 128);
+        assert_eq!(chm.table_cap(), 128);
+
+        for i in 0..100 {
+            chm.remove(i,i);
+        }
+        assert_eq!(chm.size(), 0);
+        assert_eq!(chm.max_cap(), 128);
+        assert_eq!(chm.table_cap(), 128);
+        
     }
     
     #[test]
