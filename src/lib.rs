@@ -26,7 +26,7 @@ const MAX_LOAD_FACTOR: f32 = 1.0;
 //TODO: currently have to clone K,V during grow operation, could consider other options (extra indirection)
 //TODO: probably going to want to modularise the code better soon :-)
 //TODO: iterators, extra useful methods, etc etc
-//TODO: fix memory leaks: crossbeam issue #13 is full resolution, but we can improve the current situation.
+//TODO: fix memory leaks: crossbeam issue #13 allows full resolution, but we can improve the current situation.
 //TODO: comments!
 
 /// This is a simple concurrent hash map. It uses a design that's lock free on gets,
@@ -46,7 +46,7 @@ pub struct ConcurrentHashMap<K: Eq + Hash + Sync + Clone, V: Sync + Clone> {
     rng_keys: (u64, u64),
 }
 
-pub struct CHMInner<K: Eq + Hash + Sync + Clone, V: Sync + Clone> {
+struct CHMInner<K: Eq + Hash + Sync + Clone, V: Sync + Clone> {
     segments: Vec<CHMSegment<K, V>>,
     bit_mask: u32,
     mask_shift_count: u32,
@@ -58,7 +58,7 @@ struct CHMSegment<K: Eq + Hash + Sync + Clone, V: Sync + Clone> {
     //todo: the following could just be fenced rather than using atomic types.  Easier
     //not to bother right now, but could certainly change later
     max_capacity: AtomicUsize,
-    size: AtomicUsize,
+    len: AtomicUsize,
 }
 
 struct CHMEntry<K, V> {
@@ -68,6 +68,8 @@ struct CHMEntry<K, V> {
     next: Atomic<CHMEntry<K, V>>
 }
 
+/// Gives a new handle onto the HashMap (much like clone on an Arc).  Does not copy the contents
+/// of the map.
 impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> Clone for ConcurrentHashMap<K, V> {
     fn clone(&self) -> ConcurrentHashMap<K, V> {
         ConcurrentHashMap{ inner: self.inner.clone(), rng_keys: self.rng_keys }
@@ -76,10 +78,22 @@ impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> Clone for ConcurrentHashMap<K
 
 impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> ConcurrentHashMap<K, V> {
 
+    /// Creates a new HashMap with default options (segment count = 8, capacity = 16, load factor = 0.8)
     pub fn new() -> ConcurrentHashMap<K, V> {
         Self::new_with_options(DEFAULT_CAPACITY, DEFAULT_SEGMENT_COUNT, DEFAULT_LOAD_FACTOR)
     }
 
+    /// Creates a new HashMap.  There are three tuning options: capacity, segment count, and load factor.
+    /// Load factor and capacity are pretty much what you'd expect: load factor describes the level of table
+    /// full-ness of the table at which we grow to avoid excess collisions.  Capacity is simply initial capacity.
+    ///
+    /// Segment count describes the number of segments the table is divided into.  Each segment is essentially
+    /// an autonomous hash table that receives a division of the hash space. Each segment has a write lock,
+    /// so only one write can happen per segment at any one time.  Reads can still proceed while writes are in
+    /// progress.  For tables with a lot of write activity, a higher segment count will be beneficial.
+    ///
+    /// Both capacity and segment count must be powers of two - if they're not, each number is raised to
+    /// the next power of two. Capacity must be >= segment count, and again is increased as necessary.
     pub fn new_with_options(capacity: u32, segments: u32, load_factor: f32) -> ConcurrentHashMap<K, V> {
 
         let (capacity, segments, load_factor) = Self::check_params(capacity, segments, load_factor);
@@ -90,6 +104,7 @@ impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> ConcurrentHashMap<K, V> {
         ConcurrentHashMap { inner: Arc::new(CHMInner::new(capacity, segments, load_factor)), rng_keys: rng_keys }
     }
 
+    // error check params, making sure that capacity and segment counts are powers of two, etc.
     fn check_params(mut capacity: u32, mut segments: u32, mut load_factor: f32) -> (u32, u32, f32) {
         assert!(!load_factor.is_nan());
 
@@ -116,21 +131,27 @@ impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> ConcurrentHashMap<K, V> {
         (capacity, segments, load_factor)
     }
 
-
+    /// Inserts a key-value pair into the map. If the key was already present, the previous
+    /// value is returned.  Otherwise, None is returned.
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
         self.inner.insert(key, value, &mut SipHasher::new_with_keys(self.rng_keys.0, self.rng_keys.1))
     }
 
+    /// Gets a value from the map. If it's not present, None is returned.
     pub fn get(&self, key: K) -> Option<V> {
         self.inner.get(key, &mut SipHasher::new_with_keys(self.rng_keys.0, self.rng_keys.1))
     }
 
+    /// Removes a key-value pair from the map. If the key was found, the value associated with
+    /// it is returned. Otherwise, None is returned.
     pub fn remove(&mut self, key: K) -> Option<V> {
         self.inner.remove(key, &mut SipHasher::new_with_keys(self.rng_keys.0, self.rng_keys.1))
     }
 
-    pub fn size(&self) -> u32 {
-        self.inner.size()
+    /// Returns the size of the map. Note that this size is a best-effort approximation, as
+    /// concurrent activity may lead to an inaccurate count.
+    pub fn len(&self) -> u32 {
+        self.inner.len()
     }
 
 }
@@ -157,8 +178,7 @@ impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> CHMInner<K, V> {
 
     }
 
-    // we mask from the top bits of the hash so as not to bias each segment's
-    // buckets
+    // we mask from the top bits of the hash so as not to bias each segment's distribution
     fn make_segment_bit_mask(seg_count: u32) -> (u32, u32) {
         let mut bit_mask = seg_count - 1;
         let mut shift_count = 0;
@@ -197,8 +217,8 @@ impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> CHMInner<K, V> {
         (segment as usize, hash)
     }
 
-    fn size(&self) -> u32 {
-        self.segments.iter().fold(0, |acc, segment| acc + segment.size() as u32)
+    fn len(&self) -> u32 {
+        self.segments.iter().fold(0, |acc, segment| acc + segment.len() as u32)
     }
 }
 
@@ -210,7 +230,7 @@ impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> CHMSegment<K, V> {
 
         let max_cap = (capacity as f32 * load_factor) as usize;
 
-        let segment = CHMSegment { table: Atomic::null(), lock: Mutex::new(()), size: AtomicUsize::new(0), max_capacity: AtomicUsize::new(max_cap)};
+        let segment = CHMSegment { table: Atomic::null(), lock: Mutex::new(()), len: AtomicUsize::new(0), max_capacity: AtomicUsize::new(max_cap)};
         //Don't believe we need Release here - new only called when we're constructing the CHM. Releasing should be handled by
         //concurrency primitives transferring the CHM between threads.
         //segment.table.store(Some(Owned::new(Self::new_table(capacity))), Relaxed);
@@ -219,22 +239,26 @@ impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> CHMSegment<K, V> {
         segment
     }
 
-    fn size(&self) -> usize {
-        self.size.load(Relaxed)
+    fn len(&self) -> usize {
+        self.len.load(Relaxed)
     }
 
     fn insert(&self, key: K, value: V, hash: u32) -> Option<V> {
         //TODO: our mutex-guarded work is not contained by the mutex. Not 1000% sure if this is correct, but for this
         //work we can't have the data stored within the mutex.
-        //Able to use relaxed ordering for acquires because our mutex will do the necessary acquiring from any
+        //Able to use relaxed ordering for reads because our mutex will do the necessary acquiring from any
         //previous writes
-
         let lock_guard = self.lock.lock().expect("Couldn't lock segment mutex");
         let ret = self.insert_inner(key, value, hash, &self.table);
         drop(lock_guard);
         ret
     }
 
+    // Interior function to insert data.  Assumes appropriate locking has already been performed
+    // to prevent multiple concurrent writes.
+    //
+    // NB: Able to use relaxed ordering for reads because our mutex will have done the necessary acquiring from any
+    // previous writes
     fn insert_inner(&self, key: K, value: V, hash: u32, s_table: &Atomic<Vec<Atomic<CHMEntry<K, V>>>>) -> Option<V> {
         let guard = epoch::pin();
         
@@ -248,14 +272,16 @@ impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> CHMSegment<K, V> {
             let bucket_data = bucket.load(Relaxed, &guard);
             let entry = match bucket_data {
                 None => {
-                    // try to avoid LOCK CMPXCHG, we're single threaded anyway
-                    self.size.store(self.size() + 1, Relaxed);
+                    // Rather than doing atomic increment, do manual get + set. Atomic increment requires
+                    // LOCK CMPXCHG on x86 which is unnecessary, we're single threaded here anyway
+                    self.len.store(self.len() + 1, Relaxed);
                     break;
                 },
                 Some(data) => data
             };
-            
+
         if entry.hash == new_node.hash && entry.key == new_node.key {
+                // Key already exists, let's replace.
                 ret = Some(entry.value.clone());
                 new_node.next.store_shared(entry.next.load(Relaxed, &guard), Release);
                 break;
@@ -270,7 +296,7 @@ impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> CHMSegment<K, V> {
             }
         } else {
             // do we need to resize the table?
-            if self.size() >= self.max_capacity.load(Relaxed) {
+            if self.len() >= self.max_capacity.load(Relaxed) {
                 self.grow(&guard);
             }
         }
@@ -346,6 +372,11 @@ impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> CHMSegment<K, V> {
         ret
     }
 
+    // Interior function to remove data.  Assumes appropriate locking has already been performed
+    // to prevent multiple concurrent writes.
+    //
+    // NB: Able to use relaxed ordering for reads because our mutex will have done the necessary acquiring from any
+    // previous writes
     fn remove_inner(&self, key: K, hash: u32) -> Option<V> {
         let guard = epoch::pin();
         
@@ -365,7 +396,7 @@ impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> CHMSegment<K, V> {
             if entry.hash == hash && entry.key == key {
                 bucket.store_shared(entry.next.load(Relaxed, &guard), Release);
                 let ret = entry.value.clone();
-                self.size.fetch_sub(1, Relaxed);
+                self.len.fetch_sub(1, Relaxed);
                 unsafe {
                     guard.unlinked(entry);
                 }
@@ -434,6 +465,7 @@ impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> Drop for CHMSegment<K, V> {
 mod test {
     use super::*;
     use super::CHMSegment;
+    use super::CHMInner;
     use std::sync::mpsc::sync_channel;
     use std::thread;
     use std::sync::Arc;
@@ -528,31 +560,42 @@ mod test {
             assert_eq!(chm.get(i), None);
         }
     }
+
+    #[test]
+    fn check_hash_collisions() {
+        let chm = CHMSegment::<u32, u32>::new(16, 1.0);
+        for i in 0..100 {
+            assert_eq!(chm.insert(i,i,0), None);
+        }
+        for i in 0..100 {
+            assert_eq!(chm.insert(i,i+1,0), Some(i));
+        }
+    }
     
     #[test]
-    fn check_size() {
+    fn check_len() {
         let chm = CHMSegment::<u32, u32>::new(16, 1.0);
         assert_eq!(chm.max_cap(), 16);
         assert_eq!(chm.table_cap(), 16);
-        assert_eq!(chm.size(), 0);
+        assert_eq!(chm.len(), 0);
         for i in 0..100 {
-            chm.insert(i,i,i);
+            assert_eq!(chm.insert(i,i,i), None);
         }
-        assert_eq!(chm.size(), 100);
+        assert_eq!(chm.len(), 100);
         assert_eq!(chm.max_cap(), 128);
         assert_eq!(chm.table_cap(), 128);
 
         for i in 0..100 {
-            chm.insert(i,i+1,i);
+            assert_eq!(chm.insert(i,i+1,i), Some(i));
         }
-        assert_eq!(chm.size(), 100);
+        assert_eq!(chm.len(), 100);
         assert_eq!(chm.max_cap(), 128);
         assert_eq!(chm.table_cap(), 128);
 
         for i in 0..100 {
-            chm.remove(i,i);
+            assert_eq!(chm.remove(i,i), Some(i+1));
         }
-        assert_eq!(chm.size(), 0);
+        assert_eq!(chm.len(), 0);
         assert_eq!(chm.max_cap(), 128);
         assert_eq!(chm.table_cap(), 128);
         
