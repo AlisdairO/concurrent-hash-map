@@ -156,6 +156,10 @@ impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone, H: BuildHasher> ConcurrentHas
         self.inner.len()
     }
 
+    pub fn entries(&self) -> Vec<(K, V)> {
+        self.inner.entries()
+    }
+
 }
 
 impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> CHMInner<K, V> {
@@ -221,6 +225,10 @@ impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> CHMInner<K, V> {
 
     fn len(&self) -> u32 {
         self.segments.iter().fold(0, |acc, segment| acc + segment.len() as u32)
+    }
+
+    fn entries(&self) -> Vec<(K, V)> {
+        self.segments.iter().fold(Vec::new(), |mut acc, segment| { acc.extend_from_slice(&segment.entries()); acc })
     }
 }
 
@@ -341,6 +349,20 @@ impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> CHMSegment<K, V> {
             }
         }
         guard.unlinked(table);
+    }
+
+    fn entries(&self) -> Vec<(K, V)> {
+        let mut xs = vec![];
+        let guard = epoch::pin();
+        let table = self.table.load(Relaxed, &guard).unwrap();
+        for mut bucket in table.iter() {
+            while let Some(entry) = bucket.load(Relaxed, &guard) {
+                let e = (entry.key.clone(), entry.value.clone());
+                xs.push(e);
+                bucket = &entry.next;
+            }
+        }
+        xs
     }
 
     fn get(&self, key: K, hash: u32) -> Option<V> {
