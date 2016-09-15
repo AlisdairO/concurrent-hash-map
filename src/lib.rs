@@ -3,8 +3,7 @@ extern crate rand;
 
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::hash::SipHasher;
-use std::hash::{Hasher, BuildHasher, BuildHasherDefault, Hash};
+use std::hash::{Hasher, BuildHasher, Hash};
 use std::cmp::min;
 use std::sync::atomic::Ordering::{Acquire, Release, Relaxed};
 use std::sync::atomic::AtomicUsize;
