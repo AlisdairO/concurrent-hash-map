@@ -351,11 +351,11 @@ impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> CHMSegment<K, V> {
     }
 
     fn entries(&self) -> Vec<(K, V)> {
-        let mut xs = vec![];
+        let mut xs = Vec::with_capacity(self.len());
         let guard = epoch::pin();
-        let table = self.table.load(Relaxed, &guard).unwrap();
+        let table = self.table.load(Acquire, &guard).unwrap();
         for mut bucket in table.iter() {
-            while let Some(entry) = bucket.load(Relaxed, &guard) {
+            while let Some(entry) = bucket.load(Acquire, &guard) {
                 let e = (entry.key.clone(), entry.value.clone());
                 xs.push(e);
                 bucket = &entry.next;
