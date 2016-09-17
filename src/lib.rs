@@ -27,6 +27,7 @@ const MAX_LOAD_FACTOR: f32 = 1.0;
 //TODO: probably going to want to modularise the code better soon :-)
 //TODO: iterators, extra useful methods, etc etc
 //TODO: fix memory leaks: crossbeam issue #13 allows full resolution, but we can improve the current situation.
+//TODO: Support alternative hashers. rng_keys is on the wrong struct at the moment, but this should fix that.
 //TODO: comments!
 
 /// This is a simple concurrent hash map. It uses a design that's lock free on gets,
@@ -156,6 +157,10 @@ impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> ConcurrentHashMap<K, V> {
 
 }
 
+// CHMInner stores a vector of CHMSegments.  Each segment contains a certain fraction
+// of the hash space.  The vec has all the CHMSegments added to it at create-time.
+// The vec does not ever get altered after create-time, allowing us to auto-impl
+// Sync.
 impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> CHMInner<K, V> {
 
     fn new(capacity: u32, seg_count: u32, load_factor: f32) -> CHMInner<K, V> {
@@ -178,7 +183,9 @@ impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> CHMInner<K, V> {
 
     }
 
-    // we mask from the top bits of the hash so as not to bias each segment's distribution
+    // Make a bit mask to apply to incoming hash values.  That mask is used to decide
+    // what CHMSegment to make requests to. We mask from the top bits of the hash so
+    // as not to bias each segment's distribution
     fn make_segment_bit_mask(seg_count: u32) -> (u32, u32) {
         let mut bit_mask = seg_count - 1;
         let mut shift_count = 0;
@@ -189,6 +196,7 @@ impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> CHMInner<K, V> {
         (bit_mask, shift_count)
     }
 
+    // Given a hash, what CHMSegment should we go off to?
     fn get_segment_from_hash(&self, mut hash: u32) -> u32 {
         hash &= self.bit_mask;
         hash >>= self.mask_shift_count;
@@ -210,6 +218,8 @@ impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> CHMInner<K, V> {
         self.segments[segment].remove(key, hash)
     }
 
+    // Given a key, return the hash of the key, and the CHMSegment we need to
+    // talk to.
     fn get_hash_and_segment<H: Hasher>(&self, key: &K, hasher: &mut H) -> (usize, u32) {
         key.hash(hasher);
         let hash = hasher.finish() as u32;
@@ -231,9 +241,8 @@ impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> CHMSegment<K, V> {
         let max_cap = (capacity as f32 * load_factor) as usize;
 
         let segment = CHMSegment { table: Atomic::null(), lock: Mutex::new(()), len: AtomicUsize::new(0), max_capacity: AtomicUsize::new(max_cap)};
-        //Don't believe we need Release here - new only called when we're constructing the CHM. Releasing should be handled by
+        //Don't need Release here - new only called when we're constructing the CHM. Releasing should be handled by
         //concurrency primitives transferring the CHM between threads.
-        //segment.table.store(Some(Owned::new(Self::new_table(capacity))), Relaxed);
         segment.table.store(Some(Owned::new(Self::new_table(capacity))), Relaxed);
 
         segment
@@ -273,7 +282,7 @@ impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> CHMSegment<K, V> {
             let entry = match bucket_data {
                 None => {
                     // Rather than doing atomic increment, do manual get + set. Atomic increment requires
-                    // LOCK CMPXCHG on x86 which is unnecessary, we're single threaded here anyway
+                    // LOCK CMPXCHG on x86 which is unnecessary, we only have a single write thread anyway
                     self.len.store(self.len() + 1, Relaxed);
                     break;
                 },
