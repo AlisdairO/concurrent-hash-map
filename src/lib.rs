@@ -561,7 +561,18 @@ mod test {
         }
     
     }
-    
+
+    #[test]
+    fn many_insert_and_get_back() {
+        let mut chm = ConcurrentHashMap::<u32, u32, BuildHasherDefault<SipHasher>>::new_with_options(16, 1, 1.0, BuildHasherDefault::<SipHasher>::default());
+        let v: Vec<(u32,u32)> = (0..100).map(|i| (i, i + 1)).collect();
+        for &(i,j) in v.iter() {
+            chm.insert(i, j);
+        }
+        let mut entries = chm.entries();
+        entries.sort();
+        assert_eq!(entries, v);
+    }
     //TODO try_lock test?
     
     #[test]
