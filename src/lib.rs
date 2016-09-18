@@ -1,17 +1,15 @@
 extern crate crossbeam;
 extern crate rand;
 
-use std::hash::Hash;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::hash::SipHasher;
-use std::hash::Hasher;
+use std::hash::{Hasher, BuildHasher, Hash};
 use std::cmp::min;
-use rand::Rng;
 use std::sync::atomic::Ordering::{Acquire, Release, Relaxed};
 use std::sync::atomic::AtomicUsize;
 use crossbeam::mem::epoch::Guard;
 use crossbeam::mem::epoch::{self, Atomic, Owned, Shared};
+use std::collections::hash_map::RandomState;
 
 const DEFAULT_SEGMENT_COUNT: u32 = 8;
 const DEFAULT_CAPACITY: u32 = 16;
@@ -42,9 +40,9 @@ const MAX_LOAD_FACTOR: f32 = 1.0;
 /// 
 /// For now it may be useful for long lived hashmaps with a relatively steady size, but I
 /// don't recommend using it for anything important :-).
-pub struct ConcurrentHashMap<K: Eq + Hash + Sync + Clone, V: Sync + Clone> {
+pub struct ConcurrentHashMap<K: Eq + Hash + Sync + Clone, V: Sync + Clone, H: BuildHasher> {
     inner: Arc<CHMInner<K, V>>,
-    rng_keys: (u64, u64),
+    hasher: H,
 }
 
 struct CHMInner<K: Eq + Hash + Sync + Clone, V: Sync + Clone> {
@@ -71,18 +69,21 @@ struct CHMEntry<K, V> {
 
 /// Gives a new handle onto the HashMap (much like clone on an Arc).  Does not copy the contents
 /// of the map.
-impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> Clone for ConcurrentHashMap<K, V> {
-    fn clone(&self) -> ConcurrentHashMap<K, V> {
-        ConcurrentHashMap{ inner: self.inner.clone(), rng_keys: self.rng_keys }
+impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone, H: BuildHasher + Clone> Clone for ConcurrentHashMap<K, V, H> {
+    fn clone(&self) -> ConcurrentHashMap<K, V, H> {
+        ConcurrentHashMap{ inner: self.inner.clone(), hasher: self.hasher.clone() }
     }
 }
 
-impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> ConcurrentHashMap<K, V> {
 
+impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> ConcurrentHashMap<K, V, RandomState> {
     /// Creates a new HashMap with default options (segment count = 8, capacity = 16, load factor = 0.8)
-    pub fn new() -> ConcurrentHashMap<K, V> {
-        Self::new_with_options(DEFAULT_CAPACITY, DEFAULT_SEGMENT_COUNT, DEFAULT_LOAD_FACTOR)
+    pub fn new() -> ConcurrentHashMap<K, V, RandomState> {
+        ConcurrentHashMap::new_with_options(DEFAULT_CAPACITY, DEFAULT_SEGMENT_COUNT, DEFAULT_LOAD_FACTOR, RandomState::new())
     }
+}
+
+impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone, H: BuildHasher> ConcurrentHashMap<K, V, H> {
 
     /// Creates a new HashMap.  There are three tuning options: capacity, segment count, and load factor.
     /// Load factor and capacity are pretty much what you'd expect: load factor describes the level of table
@@ -95,14 +96,11 @@ impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> ConcurrentHashMap<K, V> {
     ///
     /// Both capacity and segment count must be powers of two - if they're not, each number is raised to
     /// the next power of two. Capacity must be >= segment count, and again is increased as necessary.
-    pub fn new_with_options(capacity: u32, segments: u32, load_factor: f32) -> ConcurrentHashMap<K, V> {
+    pub fn new_with_options(capacity: u32, segments: u32, load_factor: f32, hasher: H) -> ConcurrentHashMap<K, V, H> {
 
         let (capacity, segments, load_factor) = Self::check_params(capacity, segments, load_factor);
 
-        let mut rng = rand::thread_rng();
-        let rng_keys = (rng.gen(), rng.gen());
-
-        ConcurrentHashMap { inner: Arc::new(CHMInner::new(capacity, segments, load_factor)), rng_keys: rng_keys }
+        ConcurrentHashMap { inner: Arc::new(CHMInner::new(capacity, segments, load_factor)), hasher: hasher }
     }
 
     // error check params, making sure that capacity and segment counts are powers of two, etc.
@@ -135,24 +133,31 @@ impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> ConcurrentHashMap<K, V> {
     /// Inserts a key-value pair into the map. If the key was already present, the previous
     /// value is returned.  Otherwise, None is returned.
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
-        self.inner.insert(key, value, &mut SipHasher::new_with_keys(self.rng_keys.0, self.rng_keys.1))
+        let mut hasher = self.hasher.build_hasher();
+        self.inner.insert(key, value, &mut hasher)
     }
 
     /// Gets a value from the map. If it's not present, None is returned.
     pub fn get(&self, key: K) -> Option<V> {
-        self.inner.get(key, &mut SipHasher::new_with_keys(self.rng_keys.0, self.rng_keys.1))
+        let mut hasher = self.hasher.build_hasher();
+        self.inner.get(key, &mut hasher)
     }
 
     /// Removes a key-value pair from the map. If the key was found, the value associated with
     /// it is returned. Otherwise, None is returned.
     pub fn remove(&mut self, key: K) -> Option<V> {
-        self.inner.remove(key, &mut SipHasher::new_with_keys(self.rng_keys.0, self.rng_keys.1))
+        let mut hasher = self.hasher.build_hasher();
+        self.inner.remove(key, &mut hasher)
     }
 
     /// Returns the size of the map. Note that this size is a best-effort approximation, as
     /// concurrent activity may lead to an inaccurate count.
     pub fn len(&self) -> u32 {
         self.inner.len()
+    }
+
+    pub fn entries(&self) -> Vec<(K, V)> {
+        self.inner.entries()
     }
 
 }
@@ -229,6 +234,10 @@ impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> CHMInner<K, V> {
 
     fn len(&self) -> u32 {
         self.segments.iter().fold(0, |acc, segment| acc + segment.len() as u32)
+    }
+
+    fn entries(&self) -> Vec<(K, V)> {
+        self.segments.iter().fold(Vec::new(), |mut acc, segment| { acc.extend_from_slice(&segment.entries()); acc })
     }
 }
 
@@ -348,6 +357,20 @@ impl<K: Eq + Hash + Sync + Clone, V: Sync + Clone> CHMSegment<K, V> {
             }
         }
         guard.unlinked(table);
+    }
+
+    fn entries(&self) -> Vec<(K, V)> {
+        let mut xs = Vec::with_capacity(self.len());
+        let guard = epoch::pin();
+        let table = self.table.load(Acquire, &guard).unwrap();
+        for mut bucket in table.iter() {
+            while let Some(entry) = bucket.load(Acquire, &guard) {
+                let e = (entry.key.clone(), entry.value.clone());
+                xs.push(e);
+                bucket = &entry.next;
+            }
+        }
+        xs
     }
 
     fn get(&self, key: K, hash: u32) -> Option<V> {
@@ -478,7 +501,9 @@ mod test {
     use std::sync::mpsc::sync_channel;
     use std::thread;
     use std::sync::Arc;
-    
+    use std::hash::SipHasher;
+    use std::hash::{Hasher, BuildHasher, BuildHasherDefault, Hash};
+
     #[test]
     fn seg_bit_mask() {
         assert_eq!(CHMInner::<u32,u32>::make_segment_bit_mask(16u32), (0b11110000000000000000000000000000u32, 28));
@@ -507,21 +532,21 @@ mod test {
     
     #[test]
     fn simple_insert_and_get() {
-        let mut chm = ConcurrentHashMap::<u32, u32>::new_with_options(100, 1, 0.8);
+        let mut chm = ConcurrentHashMap::<u32, u32, BuildHasherDefault<SipHasher>>::new_with_options(100, 1, 0.8, BuildHasherDefault::<SipHasher>::default());
         chm.insert(1,100);
         assert_eq!(chm.get(1), Some(100));
     }
     
     #[test]
     fn simple_insert_and_get_other() {
-        let mut chm = ConcurrentHashMap::<u32, u32>::new_with_options(100, 1, 0.8);
+        let mut chm = ConcurrentHashMap::<u32, u32, BuildHasherDefault<SipHasher>>::new_with_options(100, 1, 0.8, BuildHasherDefault::<SipHasher>::default());
         chm.insert(1,100);
         assert_eq!(chm.get(2), None);
     }
     
     #[test]
     fn simple_insert_and_remove() {
-        let mut chm = ConcurrentHashMap::<u32, u32>::new_with_options(100, 1, 0.8);
+        let mut chm = ConcurrentHashMap::<u32, u32, BuildHasherDefault<SipHasher>>::new_with_options(100, 1, 0.8, BuildHasherDefault::<SipHasher>::default());
         chm.insert(1,100);
         assert_eq!(chm.remove(1), Some(100));
         assert_eq!(chm.get(1), None);
@@ -529,7 +554,7 @@ mod test {
     
     #[test]
     fn many_insert_and_remove() {
-        let mut chm = ConcurrentHashMap::<u32, u32>::new_with_options(16, 1, 1.0);
+        let mut chm = ConcurrentHashMap::<u32, u32, BuildHasherDefault<SipHasher>>::new_with_options(16, 1, 1.0, BuildHasherDefault::<SipHasher>::default());
         for i in 0..100 {
             assert_eq!(chm.insert(i,i), None);
         }
@@ -545,12 +570,24 @@ mod test {
         }
     
     }
-    
+
+    #[test]
+    fn many_insert_and_get_back() {
+        let mut chm = ConcurrentHashMap::<u32, u32, BuildHasherDefault<SipHasher>>::new_with_options(16, 1, 1.0, BuildHasherDefault::<SipHasher>::default());
+        assert_eq!(chm.entries(), Vec::new());
+        let v: Vec<(u32,u32)> = (0..100).map(|i| (i, i + 1)).collect();
+        for &(i,j) in v.iter() {
+            chm.insert(i, j);
+        }
+        let mut entries = chm.entries();
+        entries.sort();
+        assert_eq!(entries, v);
+    }
     //TODO try_lock test?
     
     #[test]
     fn many_insert_and_get() {
-        let mut chm = ConcurrentHashMap::<u32, u32>::new_with_options(16, 1, 1.0);
+        let mut chm = ConcurrentHashMap::<u32, u32, BuildHasherDefault<SipHasher>>::new_with_options(16, 1, 1.0, BuildHasherDefault::<SipHasher>::default());
         for i in 0..100 {
             chm.insert(i,i);
         }
@@ -561,7 +598,7 @@ mod test {
     
     #[test]
     fn many_insert_and_get_none() {
-        let mut chm = ConcurrentHashMap::<u32, u32>::new_with_options(16, 1, 1.0);
+        let mut chm = ConcurrentHashMap::<u32, u32, BuildHasherDefault<SipHasher>>::new_with_options(16, 1, 1.0, BuildHasherDefault::<SipHasher>::default());
         for i in 0..100 {
             chm.insert(i,i);
         }
@@ -651,7 +688,7 @@ mod test {
                              capacity: u32, expected_capacity: u32,
                              load_factor: f32, expected_load_factor: f32) {
         
-        let (capacity_chk, seg_count_chk, load_factor_chk) = ConcurrentHashMap::<u32, u32>::check_params(capacity, seg_count, load_factor);
+        let (capacity_chk, seg_count_chk, load_factor_chk) = ConcurrentHashMap::<u32, u32, BuildHasherDefault<SipHasher>>::check_params(capacity, seg_count, load_factor);
         assert_eq!(seg_count_chk, expected_seg_count);
         assert_eq!(capacity_chk, expected_capacity);
         assert_eq!(load_factor_chk, expected_load_factor);
